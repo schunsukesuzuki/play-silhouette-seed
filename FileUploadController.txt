@@ -1,0 +1,384 @@
+package controllers
+
+import java.util.UUID
+import javax.inject.Inject
+
+import com.mohiva.play.silhouette.api._
+import com.mohiva.play.silhouette.api.repositories.AuthInfoRepository
+import com.mohiva.play.silhouette.api.services.AvatarService
+import com.mohiva.play.silhouette.api.util.PasswordHasherRegistry
+import com.mohiva.play.silhouette.impl.providers._
+
+// SecuredRequestがないと言われるので追加
+//https://github.com/mohiva/play-silhouette-seed/blob/master/app/controllers/ChangePasswordController.scala
+import com.mohiva.play.silhouette.api.actions.SecuredRequest
+
+//uploadのActionを変更する際、WithProviderがないとエラーが出て追加
+import utils.auth.{ DefaultEnv, WithProvider }
+
+//SignUpFormを FileUploadFormに変更
+import forms.{ FileUploadForm, FileUploadFormSupport }
+import models.User
+import models.services.{ AuthTokenService, UserService }
+import play.api.i18n.{ I18nSupport, Messages, MessagesApi }
+import play.api.libs.concurrent.Execution.Implicits._
+import play.api.libs.mailer.{ Email, MailerClient }
+
+//重複
+//import play.api.mvc.Controller
+//import utils.auth.DefaultEnv
+
+import scala.concurrent.{ ExecutionContext, Future }
+
+//scalikejdbcのための追加
+import java.sql.Connection
+import scalikejdbc._
+import scalikejdbc.SQLInterpolation._
+
+//FileUploadのための追加
+import java.io.File
+import java.nio.file.attribute.PosixFilePermission._
+import java.nio.file.attribute.PosixFilePermissions
+import java.nio.file.{ Files, Path }
+import java.util
+import javax.inject._
+
+//akkaのための追加
+import akka.stream.IOResult
+import akka.stream.scaladsl._
+import akka.util.ByteString
+
+//better filesのための追加
+import better.files._
+import File._
+import java.io.{ File => JFile }
+
+import play.api._
+import play.api.data.Form
+import play.api.data.Forms._
+import play.api.i18n.MessagesApi
+import play.api.libs.streams._
+import play.api.mvc.MultipartFormData.FilePart
+import play.api.mvc._
+import play.core.parsers.Multipart.FileInfo
+
+//重複
+//import scala.concurrent.{ExecutionContext, Future}
+
+//フォルダ作成と保存のための追加
+//import java.nio.file.{Paths, Files}
+//import java.nio.file.StandardCopyOption.REPLACE_EXISTING
+//import java.io.{File => JFile} // リネームして区別しやすくする
+
+/**
+ * The `Sign Up` controller.
+ *
+ * @param messagesApi            The Play messages API.
+ * @param silhouette             The Silhouette stack.
+ * @param userService            The user service implementation.
+ * @param authInfoRepository     The auth info repository implementation.
+ * @param authTokenService       The auth token service implementation.
+ * @param avatarService          The avatar service implementation.
+ * @param passwordHasherRegistry The password hasher registry.
+ * @param mailerClient           The mailer client.
+ * @param webJarAssets           The webjar assets implementation.
+ */
+
+//SignUpControllerをFileUploadControllerに変更
+class FileUploadController @Inject() (
+  val messagesApi: MessagesApi,
+  silhouette: Silhouette[DefaultEnv],
+  userService: UserService,
+  authInfoRepository: AuthInfoRepository,
+  authTokenService: AuthTokenService,
+  avatarService: AvatarService,
+  passwordHasherRegistry: PasswordHasherRegistry,
+  mailerClient: MailerClient,
+  implicit val webJarAssets: WebJarAssets,
+  //SocialProviderRegistryを追加
+  socialProviderRegistry: SocialProviderRegistry,
+  //futureのために ec: ExecutionContextを追加
+  ec: ExecutionContext,
+  //,
+  //upload のActionの際に追加
+  credentialsProvider: CredentialsProvider
+)
+  extends Controller with I18nSupport {
+
+  // org.slf4j.LoggerFactory をimportする必要があるかもしれない
+  private val logger = org.slf4j.LoggerFactory.getLogger(this.getClass)
+
+  /**
+   * Views the `Sign Up` page.
+   *
+   * @return The result to display.
+   */
+
+  // viewをfileuploadviewに変更
+  // Signupと違ってすでにログインしているため、UnsecuredActionをSecuredActionに変更する必要がありそう
+  def fileuploadview = silhouette.SecuredAction.async { implicit request =>
+    //  def fileuploadview = silhouette.UnsecuredAction.async { implicit request =>
+    // signUpをfileUploadに、SignUpFormをFileUploadForm変更
+    // さらにrequest.identityを持たせる
+    Future.successful(Ok(views.html.fileUpload(request.identity, FileUploadForm.form)))
+    //    Future.successful(Ok(views.html.fileUpload(FileUploadForm.form)))
+  }
+
+  //request.identityから格納されているログイン情報を取得するのは、ApplicationControllerでやっていて、scala.main.htmlがこの中にある def indexを呼び出しているので、このファイル（やSignUpController.scala）では必要ない
+  /**
+   * Handles the index action.
+   *
+   * @return The result to display.
+   */
+  //  def index = silhouette.SecuredAction.async { implicit request =>
+  //    Future.successful(Ok(views.html.home(request.identity)))
+  //  }
+
+  // def insert(data: Data): Unit = SignUpFormSupport.insert(data)
+
+  /**
+   * Handles the submitted form.
+   *
+   * @return The result to display.
+   */
+
+  //https://github.com/playframework/play-scala-fileupload-example/blob/2.5.x/app/controllers/HomeController.scala
+  //より転載
+
+  type FilePartHandler[A] = FileInfo => Accumulator[ByteString, FilePart[A]]
+
+  /**
+   * Uses a custom FilePartHandler to return a type of "File" rather than
+   * using Play's TemporaryFile class.  Deletion must happen explicitly on
+   * completion, rather than TemporaryFile (which uses finalization to
+   * delete temporary files).
+   *
+   * @return
+   */
+  private def handleFilePartAsFile: FilePartHandler[File] = {
+    case FileInfo(partName, filename, contentType) =>
+      //permissionsのvalを追加したけどいらない
+      //val perms = java.util.EnumSet.of(OWNER_READ, OWNER_WRITE)
+      val attr = PosixFilePermissions.asFileAttribute(util.EnumSet.of(OWNER_READ, OWNER_WRITE))
+      val path: Path = Files.createTempFile("multipartBody", "tempFile", attr)
+      val file = path.toFile
+
+      //https://github.com/pathikrit/better-files/blob/master/core/src/main/scala/better/files/Implicits.scala
+      //  implicit class StringOps(str: String) {
+      //    def toFile: File =
+      //      File(str)
+      //    def /(child: String): File =
+      //      toFile / child
+
+      val fileSink: Sink[ByteString, Future[IOResult]] = FileIO.toPath(path)
+      val accumulator: Accumulator[ByteString, IOResult] = Accumulator(fileSink)
+      accumulator.map {
+        case IOResult(count, status) =>
+          logger.info(s"count = $count, status = $status")
+          FilePart(partName, filename, contentType, file)
+      }
+  }
+
+  /**
+   * A generic operation on the temporary file that deletes the temp file after completion.
+   */
+  private def operateOnTempFile(file: File) = {
+    val size = Files.size(file.toPath)
+    logger.info(s"size = ${size}")
+    Files.deleteIfExists(file.toPath)
+    size
+  }
+
+  /**
+   * Uploads a multipart file as a POST request.
+   *
+   * @return
+   */
+  //  def upload = Action(parse.multipartFormData(handleFilePartAsFile)) { implicit request =>
+  //    val fileOption = request.body.file("name").map {
+  //      case FilePart(key, filename, contentType, file) =>
+  //        logger.info(s"key = ${key}, filename = ${filename}, contentType = ${contentType}, file = $file")
+  //        val data = operateOnTempFile(file)
+  //        data
+  //    }
+
+  //    Ok(s"file size = ${fileOption.getOrElse("no file")}")
+  //  }
+
+  // submitを uploadに変更、さらに上の公式サンプルを参考に、multipartFormDataの情報を追加
+  // UnsecuredActionをSecuredActionに変更
+  //参考
+  //  def submit = silhouette.SecuredAction(WithProvider[DefaultEnv#A](CredentialsProvider.ID)).async {
+
+  //  おそらく失敗作
+  //  def upload = silhouette.SecuredAction(WithProvider[DefaultEnv#A](CredentialsProvider.ID), parse.multipartFormData(handleFilePartAsFile)).async 
+
+  //  まずuploadのメソッドを設定して、その中で　request.identityを持たせる
+  //def upload = silhouette.SecuredAction(parse.multipartFormData(handleFilePartAsFile))
+
+  //この辺りの行がわからない
+
+  //def upload = silhouette.SecuredAction(WithProvider[DefaultEnv#A](CredentialsProvider.ID)).async {
+
+  //        implicit request: SecuredRequest[DefaultEnv, AnyContent] =>
+
+  def upload = Action(parse.multipartFormData(handleFilePartAsFile)) { implicit request =>
+    //def upload = silhouette.SecuredAction(WithProvider[DefaultEnv#A](CredentialsProvider.ID)).async(parse.multipartFormData(handleFilePartAsFile)) {
+
+    //https://github.com/mohiva/play-silhouette-seed/blob/master/app/controllers/ChangePasswordController.scala 
+
+    // SignUpFormをFileUploadFormに変更
+
+    //    bindをするならば、拡張子によってエラーを起こすようにする必要があるかもしれない
+    //    FileUploadForm.form.bindFromRequest.fold(
+
+    // signUpをfileUploadに変更、 fileupload以下の ()内を、formから request.identity,FileUploadForm.form に変更
+
+
+    FileUploadFormSupport.picsave(picFormData)
+
+
+
+    val fileOption = request.body.file("name").map {
+      case FilePart(key, filename, contentType, file) =>
+        logger.info(s"key = ${key}, filename = ${filename}, contentType = ${contentType}, file = $file")
+        //  dataをdata2 に変更。2つ目のdataの意味がわからない。
+        val data2 = operateOnTempFile(file)
+        //なくてもエラーは変わらない？なくてもいいのか？
+        data2
+
+    }
+
+    //https://github.com/mohiva/play-silhouette-seed/blob/master/app/controllers/ChangePasswordController.scala  
+    //    implicit request: SecuredRequest[DefaultEnv, AnyContent] =>
+    //      ChangePasswordForm.form.bindFromRequest.fold(
+    //        form => Future.successful(BadRequest(views.html.changePassword(form, request.identity))),
+
+    //このメソッドをどこかで使いたい
+    //silhouette.SecuredAction(WithProvider[DefaultEnv#A](CredentialsProvider.ID)).async
+
+    //    FileUploadForm.form.bindFromRequest.fold(
+
+    //      form => Future.successful(BadRequest(views.html.fileUpload(form))),
+    //        data => {
+    //  SignUpControllerを、FileUploadControllerに変更、viewをfileuploadviewに変更
+
+    //data.emailはrequest.identityを参照してほしいが、現状fileUploadFormを参照してしまっているので値がないと言われてしまうので、data.emailを、request.identity.email に変更。
+    //        val result = Redirect(routes.FileUploadController.fileuploadview()).flashing("info" -> Messages("redirect", request.identity.email))
+
+    // LoginInfoの第2引数は最初data.emailが入っていた。上同様エラーが出ていたので、 直前の val resultを代入し、さらにtoStringでString型に変換して型エラーを回避した。
+    //        val loginInfo = LoginInfo(CredentialsProvider.ID, result.toString)
+    //        userService.retrieve(loginInfo).flatMap {
+    //          case Some(user) =>
+    //            val url = routes.SignInController.view().absoluteURL()
+    //            mailerClient.send(Email(
+    //              subject = Messages("email.already.signed.up.subject"),
+    //              from = Messages("email.from"),
+
+    //  フォルダ作成と保存の部分はsupportファイルで
+    //                val emailforupload = data.email
+
+    //import picFormData._
+    //  sqlの追加
+    //現状picFormDataだと値がないと言われる
+    //dataだとtype mismatchが起きてると言われる
+    //[error]  found   : Unit
+    //[error]  required: scala.concurrent.Future[?]
+    //[error]             FileUploadFormSupport.picsave(data)
+
+    //         Future.successful(result)
+
+    //          FileUploadFormSupport.mkdirandsave(picFormData)
+    //              to = Seq(data.email),
+    //              bodyText = Some(views.txt.emails.alreadySignedUp(user, url).body),
+    //              bodyHtml = Some(views.html.emails.alreadySignedUp(user, url).body)
+    //            ))
+    //    }
+
+    //   }
+
+    //    )
+    //FileUploadFormのバインド終了
+
+    //1.request.identity(かsql)でcustomer1のloginNameを呼び出す 
+    //おそらく格納したuser.emailを使ってsqlで selectすれば該当するloginNameが取得できる
+    //2.呼び出したloginNameをフォルダ名にしてフォルダを自動生成
+    //3.ファイルをそこに保存
+    //以上のプロセスを以下に実装する 
+    //参考：https://www.qoosky.io/techs/f7851bb2e4
+    //            SignUpFormSupport.insert(data)
+
+    //1.request.identity(かsql)でcustomer1のloginNameを呼び出す 
+    //おそらく格納したuser.emailを使ってsqlで selectすれば該当するloginNameが取得できる
+
+    //Okを挟むべき位置がわからないので、とりあえず最後に配置
+    Ok(s"file size = ${fileOption.getOrElse("no file")}")
+  }
+
+  // 最後にhome.scala.htmlに画像を表示する機能を実装する必要がある
+  // home.scala.htmlに直接フォルダへのパスを指定するだけでいいかもしれない
+  // プロフィール画像に指定するときは、改めて複製、リネームしてプロフィール画像にすればいいかもしれない
+  //フォームに、「プロフィール画像にするかのチェックボックス」を追加して、caseで場合分け
+
+}
+
+//      data => {
+// SignUpControllerを、FileUploadControllerに変更、viewをfileuploadviewに変更
+//        val result = Redirect(routes.FileUploadController.fileuploadview()).flashing("info" -> Messages("sign.up.email.sent", data.email))
+//        val loginInfo = LoginInfo(CredentialsProvider.ID, data.email)
+//        userService.retrieve(loginInfo).flatMap {
+//          case Some(user) =>
+//            val url = routes.SignInController.view().absoluteURL()
+//            mailerClient.send(Email(
+//              subject = Messages("email.already.signed.up.subject"),
+//              from = Messages("email.from"),
+//              to = Seq(data.email),
+//              bodyText = Some(views.txt.emails.alreadySignedUp(user, url).body),
+//              bodyHtml = Some(views.html.emails.alreadySignedUp(user, url).body)
+//            ))
+//
+//           Future.successful(result)
+
+//          case None =>
+//            val authInfo = passwordHasherRegistry.current.hash(data.main.toString)
+//            val user = User(
+//              userID = UUID.randomUUID(),
+//              loginInfo = loginInfo,
+//              firstName = Some(data.firstName),
+//              lastName = Some(data.lastName),
+//              fullName = Some(data.firstName + " " + data.lastName),
+//              email = Some(data.email),
+//              avatarURL = None,
+//              activated = false
+//            )
+
+//以下の一文でdataをinsertメソッドに渡す
+//            SignUpFormSupport.insert(data)
+
+//ここにfileuploadのための指示を追加
+
+//            for {
+//              avatar <- avatarService.retrieveURL(data.email)
+//              user <- userService.save(user.copy(avatarURL = avatar))
+//              authInfo <- authInfoRepository.add(loginInfo, authInfo)
+//              authToken <- authTokenService.create(user.userID)
+//            } yield {
+//              val url = routes.ActivateAccountController.activate(authToken.id).absoluteURL()
+//              mailerClient.send(Email(
+//                subject = Messages("email.sign.up.subject"),
+//                from = Messages("email.from"),
+//                to = Seq(data.email),
+//                bodyText = Some(views.txt.emails.signUp(user, url).body),
+//                bodyHtml = Some(views.html.emails.signUp(user, url).body)
+//              ))
+
+// api/EventBus.scala にあるcase class SignUpEvent で定義されている。
+//              silhouette.env.eventBus.publish(SignUpEvent(user, request))
+
+//              result
+//            }
+//        }
+//      }
+//    )
+//  }
+//}
