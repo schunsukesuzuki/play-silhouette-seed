@@ -154,6 +154,8 @@ class FileUploadController @Inject() (
   def upload = Action(parse.multipartFormData(handleFilePartAsFile)) { implicit request =>
 
     //picNameはviewのformhelper、modelのメンバと一致しなければならない
+    //一致してなくてもエラーは出ないので注意
+
     val fileOption = request.body.file("picName").map {
 
       case FilePart(key, filename, contentType, file) =>
