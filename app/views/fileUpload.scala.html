@@ -1,0 +1,22 @@
+@( user:models.User, form: Form[forms.FileUploadForm.PicFormData])(implicit request: RequestHeader, messages: Messages, webJarAssets: WebJarAssets)
+
+@import b3.inline.fieldConstructor
+
+@main(Messages("fileupload.title"), Some(user)) {
+    <fieldset class="col-md-6 col-md-offset-3">
+        <legend>@Messages("fileupload")</legend>
+        @helper.form(action = routes.FileUploadController.upload, 'enctype -> "multipart/form-data") {
+
+            @helper.CSRF.formField
+            @helper.inputFile(form("picName"))
+ 
+            <div class="form-group">
+                <div>
+                    <input id="submit" type="submit" value="upload file">@Messages("fileupload")
+                </div>
+            </div>
+       
+       }
+
+    </fieldset>
+}
