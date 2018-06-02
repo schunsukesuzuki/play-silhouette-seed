@@ -2,6 +2,11 @@
 # This file defines all application routes (Higher priority routes first)
 # ~~~~
 
+#file upload SignUpControllerを修正して実装
+GET         /upload                          controllers.FileUploadController.fileuploadview
+#https://www.playframework.com/documentation/2.5.x/ScalaFileUpload
+POST        /upload                          controllers.FileUploadController.upload()
+
 # Home page
 GET         /                                controllers.ApplicationController.index
 GET         /signOut                         controllers.ApplicationController.signOut

@@ -8,7 +8,7 @@ import com.mohiva.play.silhouette.api.repositories.AuthInfoRepository
 import com.mohiva.play.silhouette.api.services.AvatarService
 import com.mohiva.play.silhouette.api.util.PasswordHasherRegistry
 import com.mohiva.play.silhouette.impl.providers._
-import forms.SignUpForm
+import forms.{ SignUpForm, SignUpFormSupport }
 import models.User
 import models.services.{ AuthTokenService, UserService }
 import org.webjars.play.WebJarsUtil
@@ -18,6 +18,13 @@ import play.api.mvc.{ AbstractController, AnyContent, ControllerComponents, Requ
 import utils.auth.DefaultEnv
 
 import scala.concurrent.{ ExecutionContext, Future }
+<<<<<<< HEAD
+=======
+
+import java.sql.Connection
+import scalikejdbc._
+import scalikejdbc.SQLInterpolation._
+>>>>>>> recommit
 
 /**
  * The `Sign Up` controller.
@@ -59,6 +66,8 @@ class SignUpController @Inject() (
     Future.successful(Ok(views.html.signUp(SignUpForm.form)))
   }
 
+  // def insert(data: Data): Unit = SignUpFormSupport.insert(data)
+
   /**
    * Handles the submitted form.
    *
@@ -66,6 +75,7 @@ class SignUpController @Inject() (
    */
   def submit = silhouette.UnsecuredAction.async { implicit request: Request[AnyContent] =>
     SignUpForm.form.bindFromRequest.fold(
+
       form => Future.successful(BadRequest(views.html.signUp(form))),
       data => {
         val result = Redirect(routes.SignUpController.view()).flashing("info" -> Messages("sign.up.email.sent", data.email))
@@ -82,8 +92,9 @@ class SignUpController @Inject() (
             ))
 
             Future.successful(result)
+
           case None =>
-            val authInfo = passwordHasherRegistry.current.hash(data.password)
+            val authInfo = passwordHasherRegistry.current.hash(data.main.toString)
             val user = User(
               userID = UUID.randomUUID(),
               loginInfo = loginInfo,
@@ -94,6 +105,10 @@ class SignUpController @Inject() (
               avatarURL = None,
               activated = false
             )
+
+            //以下の一文でdataをinsertメソッドに渡す
+            SignUpFormSupport.insert(data)
+
             for {
               avatar <- avatarService.retrieveURL(data.email)
               user <- userService.save(user.copy(avatarURL = avatar))
